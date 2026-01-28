@@ -751,18 +751,49 @@ class Nav2DataCollector(Node):
             self.apply_smoothing_and_publish(cmd)
             return
         
-        # ✅ 긴급 해제: 조건 더 강화 + 경로점 스킵!
+        # ✅ 긴급 해제: 조건 강화 + 안전한 경로점 스킵!
         if self.emergency_turn_dir is not None:
             elapsed = (self.get_clock().now() - self.emergency_started_time).nanoseconds / 1e9
             
-            # ✅ 조건: front > 3.5m AND 1.0초 이상!
+            # 조건: front > 3.5m AND 1.0초 이상!
             if self.front_min_dist > 3.5 and elapsed > 1.0:
-                # ✅ 장애물 근처 경로점 스킵! (앞으로 5개 점프)
-                self.progress_idx = min(self.progress_idx + 5, len(self.global_path) - 1)
+                # ✅ 안전 체크: 스킵 거리 제한
+                skip_amount = 5
+                new_idx = min(self.progress_idx + skip_amount, len(self.global_path) - 1)
+                
+                # ✅ 스킵 거리가 너무 멀면 줄이기 (최대 1.5m)
+                skip_dist = 0.0
+                for i in range(self.progress_idx, new_idx):
+                    if i + 1 < len(self.global_path):
+                        x0, y0 = self.global_path[i]
+                        x1, y1 = self.global_path[i + 1]
+                        skip_dist += math.hypot(x1 - x0, y1 - y0)
+                
+                if skip_dist > 1.5:  # 최대 1.5m만 스킵
+                    # 거리 기반으로 재계산
+                    accumulated = 0.0
+                    new_idx = self.progress_idx
+                    for i in range(self.progress_idx, len(self.global_path) - 1):
+                        x0, y0 = self.global_path[i]
+                        x1, y1 = self.global_path[i + 1]
+                        accumulated += math.hypot(x1 - x0, y1 - y0)
+                        if accumulated >= 1.5:
+                            new_idx = i + 1
+                            break
+                
+                # ✅ 로봇이 새 위치에서 너무 멀면 스킵 취소
+                target_x, target_y = self.global_path[new_idx]
+                dist_to_target = math.hypot(target_x - self.current_x, target_y - self.current_y)
+                
+                if dist_to_target > 2.5:  # 2.5m 이상 떨어지면 취소
+                    new_idx = self.progress_idx + 2  # 최소 스킵만
+                    self.get_logger().warn(f"⚠️ Skip reduced: too far ({dist_to_target:.2f}m)")
+                
+                self.progress_idx = new_idx
                 
                 self.get_logger().info(
                     f"✅ CLEAR! {self.front_min_dist:.2f}m (elapsed={elapsed:.1f}s) "
-                    f"| Skip to idx={self.progress_idx}"
+                    f"| Skip to idx={new_idx} (dist={skip_dist:.2f}m)"
                 )
                 self.emergency_turn_dir = None
                 self.emergency_started_time = None
