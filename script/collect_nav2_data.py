@@ -723,6 +723,15 @@ class Nav2DataCollector(Node):
 
         self.front_min_dist = self.compute_front_min()
         
+        # ✅ 디버깅: 매 루프마다 상태 출력
+        if self.get_clock().now().nanoseconds % 500000000 < 50000000:  # 0.5초마다
+            min_all = min(self.ranges) if self.ranges else 999.0
+            self.get_logger().info(
+                f"📊 front={self.front_min_dist:.2f}m | min_all={min_all:.2f}m | "
+                f"mode={self.mode} | emergency_dir={'SET' if self.emergency_turn_dir else 'NONE'}",
+                throttle_duration_sec=0.5
+            )
+        
         # ✅ 긴급 회피: LiDAR 블라인드 존(~1m) 대비!
         if self.front_min_dist < 2.0:
             # 첫 진입: 방향 결정
@@ -751,50 +760,22 @@ class Nav2DataCollector(Node):
             self.apply_smoothing_and_publish(cmd)
             return
         
-        # ✅ 긴급 해제: 조건 강화 + 안전한 경로점 스킵!
+        # ✅ 긴급 해제: 충분히 멀어진 후!
         if self.emergency_turn_dir is not None:
             elapsed = (self.get_clock().now() - self.emergency_started_time).nanoseconds / 1e9
             
-            # 조건: front > 3.5m AND 1.0초 이상!
-            if self.front_min_dist > 3.5 and elapsed > 1.0:
-                # ✅ 안전 체크: 스킵 거리 제한
-                skip_amount = 5
-                new_idx = min(self.progress_idx + skip_amount, len(self.global_path) - 1)
-                
-                # ✅ 스킵 거리가 너무 멀면 줄이기 (최대 1.5m)
-                skip_dist = 0.0
-                for i in range(self.progress_idx, new_idx):
-                    if i + 1 < len(self.global_path):
-                        x0, y0 = self.global_path[i]
-                        x1, y1 = self.global_path[i + 1]
-                        skip_dist += math.hypot(x1 - x0, y1 - y0)
-                
-                if skip_dist > 1.5:  # 최대 1.5m만 스킵
-                    # 거리 기반으로 재계산
-                    accumulated = 0.0
-                    new_idx = self.progress_idx
-                    for i in range(self.progress_idx, len(self.global_path) - 1):
-                        x0, y0 = self.global_path[i]
-                        x1, y1 = self.global_path[i + 1]
-                        accumulated += math.hypot(x1 - x0, y1 - y0)
-                        if accumulated >= 1.5:
-                            new_idx = i + 1
-                            break
-                
-                # ✅ 로봇이 새 위치에서 너무 멀면 스킵 취소
-                target_x, target_y = self.global_path[new_idx]
-                dist_to_target = math.hypot(target_x - self.current_x, target_y - self.current_y)
-                
-                if dist_to_target > 2.5:  # 2.5m 이상 떨어지면 취소
-                    new_idx = self.progress_idx + 2  # 최소 스킵만
-                    self.get_logger().warn(f"⚠️ Skip reduced: too far ({dist_to_target:.2f}m)")
-                
-                self.progress_idx = new_idx
-                
+            # ✅ 매우 엄격한 조건: front > 4.0m AND 1.5초 이상!
+            if self.front_min_dist > 4.0 and elapsed > 1.5:
                 self.get_logger().info(
-                    f"✅ CLEAR! {self.front_min_dist:.2f}m (elapsed={elapsed:.1f}s) "
-                    f"| Skip to idx={new_idx} (dist={skip_dist:.2f}m)"
+                    f"✅ CLEAR! {self.front_min_dist:.2f}m (elapsed={elapsed:.1f}s)"
                 )
+                self.emergency_turn_dir = None
+                self.emergency_started_time = None
+                self.mode = "TRACK"
+            
+            # ✅ 너무 오래 회피 중이면 강제 리셋 (stuck 방지)
+            elif elapsed > 5.0:
+                self.get_logger().warn(f"⏰ Emergency timeout! Forcing clear...")
                 self.emergency_turn_dir = None
                 self.emergency_started_time = None
                 self.mode = "TRACK"
